@@ -35,29 +35,37 @@ patch(Message.prototype, {
         convertInternalTextToAnchors(bodyEl)
 
         // 2) Enhance internal record links: replace URL text with record name
-        const anchors = bodyEl.querySelectorAll('a[href*="/web#"], a[href*="/odoo#"], a[href*="/odoo/"]')
-        if (!anchors?.length) return
+        const anchors = Array.from(bodyEl.querySelectorAll('a[href*="/web#"], a[href*="/odoo#"], a[href*="/odoo/"]'))
+        if (!anchors.length) return
         const orm = this.env.services.orm
+        const byModel = new Map()
+        const targets = []
         for (const a of anchors) {
-            if (a.dataset.oeModel && a.dataset.oeId) {
-                continue // already processed (mentions etc.)
-            }
+            if (a.dataset.oeModel && a.dataset.oeId) continue
             const { id, model } = parseInternalUrl(a.getAttribute('href') || '')
             if (!id || !model) continue
-            // Replace label unconditionally with display name once parsed
-            ;(async () => {
-                try {
-                    const res = await orm.call(model, 'read', [[id], ['display_name']], {})
-                    const name = Array.isArray(res) && res[0] ? res[0].display_name : null
-                    if (name) {
-                        a.textContent = name
-                        a.setAttribute('data-oe-id', String(id))
-                        a.setAttribute('data-oe-model', model)
+            targets.push([a, model, id])
+            if (!byModel.has(model)) byModel.set(model, new Set())
+            byModel.get(model).add(id)
+        }
+        for (const [model, idSet] of byModel.entries()) {
+            const ids = Array.from(idSet)
+            orm.call(model, 'read', [ids, ['display_name']], {})
+                .then(rows => {
+                    const names = new Map(rows.map(r => [r.id, r.display_name]))
+                    for (const [a, m, id] of targets) {
+                        if (m !== model) continue
+                        const name = names.get(id)
+                        if (name) {
+                            a.textContent = name
+                            a.setAttribute('data-oe-id', String(id))
+                            a.setAttribute('data-oe-model', model)
+                            a.setAttribute('data-rll', '1')
+                        }
                     }
-                } catch {
-                    // ignore
-                }
-            })()
+                })
+                .catch(() => {
+                })
         }
     },
 })
@@ -90,4 +98,3 @@ function convertInternalTextToAnchors(root) {
     }
     return internals
 }
-
