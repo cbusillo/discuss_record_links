@@ -1,11 +1,7 @@
-from __future__ import annotations
-
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
 
-import json
-from odoo.tools.safe_eval import safe_eval
+import json  # noqa: F401
 
 
 @dataclass
@@ -13,75 +9,48 @@ class ModelCfg:
     key: str
     model: str
     label: str
-    search: List[str]
+    search: list[str]
     display_template: str
     image_field: str | None
     limit: int
     enabled: bool = True
 
 
-CFG_PARAM = "discuss_record_links.models"
+CFG_PARAM = "discuss_record_links.models"  # legacy key (no longer used)
 
 
-def default_config() -> Dict[str, ModelCfg]:
+def default_config() -> dict[str, ModelCfg]:
     return {}
 
 
-def load_config(env) -> Dict[str, ModelCfg]:
-    ICP = env["ir.config_parameter"].sudo()
-    raw = ICP.get_param(CFG_PARAM) or ""
-    cfg: Dict[str, ModelCfg] = default_config()
-    if raw:
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict):
-                out: Dict[str, ModelCfg] = {}
-                for key, val in data.items():
-                    if not isinstance(val, dict):
-                        continue
-                    base = cfg.get(key, ModelCfg(key, "", key, [], "{{ display_name }}", None, 8))
-                    out[key] = ModelCfg(
-                        key=key,
-                        model=val.get("model") or base.model,
-                        label=val.get("label") or base.label,
-                        search=list(val.get("search") or base.search),
-                        display_template=val.get("display_template") or base.display_template,
-                        image_field=val.get("image_field", base.image_field),
-                        limit=int(val.get("limit") or base.limit),
-                        enabled=bool(val.get("enabled", base.enabled)),
-                    )
-                cfg.update(out)
-        except Exception:
-            # Fallback for legacy python-literal configs
-            try:
-                data = safe_eval(raw, {})
-                if isinstance(data, dict):
-                    out: Dict[str, ModelCfg] = {}
-                    for key, val in data.items():
-                        if not isinstance(val, dict):
-                            continue
-                        base = cfg.get(key, ModelCfg(key, "", key, [], "{{ display_name }}", None, 8))
-                        out[key] = ModelCfg(
-                            key=key,
-                            model=val.get("model") or base.model,
-                            label=val.get("label") or base.label,
-                            search=list(val.get("search") or base.search),
-                            display_template=val.get("display_template") or base.display_template,
-                            image_field=val.get("image_field", base.image_field),
-                            limit=int(val.get("limit") or base.limit),
-                            enabled=bool(val.get("enabled", base.enabled)),
-                        )
-                    cfg.update(out)
-            except Exception:
-                # keep defaults on malformed input
-                pass
-    return {k: v for k, v in cfg.items() if v.enabled}
+def load_config(env) -> dict[str, ModelCfg]:
+    cfg: dict[str, ModelCfg] = {}
+    # Read structured rows only
+    try:
+        model = env["discuss.record.link.config"]
+        rows = model.sudo().search([("active", "=", True)])
+        for r in rows:
+            search_fields = [f.name for f in r.search_field_ids]
+            cfg[r.prefix.lower()] = ModelCfg(
+                key=r.prefix.lower(),
+                model=r.model_id.model,
+                label=r.label,
+                search=search_fields,
+                display_template=r.display_template or "{{ display_name }}",
+                image_field=(r.image_field_id.name if r.image_field_id else None),
+                limit=r.limit or 8,
+                enabled=True,
+            )
+    except Exception:
+        # During module install/update the model might be unavailable briefly.
+        pass
+    return cfg
 
 
 VAR_RE = re.compile(r"{{\s*(\w+)\s*}}")
 
 
-def extract_template_fields(template: str) -> List[str]:
+def extract_template_fields(template: str) -> list[str]:
     return [m.group(1) for m in VAR_RE.finditer(template or "")]
 
 
@@ -94,7 +63,7 @@ def render_template(template: str, values: dict) -> str:
     return VAR_RE.sub(repl, template)
 
 
-def parse_prefix(term: str, config: Dict[str, ModelCfg]) -> Tuple[str | None, str]:
+def parse_prefix(term: str, config: dict[str, ModelCfg]) -> tuple[str | None, str]:
     t = (term or "").lstrip()
     if ":" in t:
         # short form: p: query, m: query, etc.

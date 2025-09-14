@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-from typing import List
-
 from odoo import http
 from odoo.http import request
 
@@ -20,17 +16,15 @@ class DiscussRecordLinks(http.Controller):
         def build_domain(c: ModelCfg):
             if not tokens:
                 return []
-            domain = []
+            domain: list = []
+            fields = c.search or ["name"]
             for t in tokens:
-                if not c.search:
-                    sub = ["name", "ilike", t]
+                # OR across all fields for this single token
+                leaves: list = [[f, "ilike", t] for f in fields]
+                if len(leaves) > 1:
+                    sub = ["|"] * (len(leaves) - 1) + leaves
                 else:
-                    # OR across fields for a single token
-                    sub: List = []
-                    for i, f in enumerate(c.search):
-                        if i:
-                            sub.insert(0, "|")
-                        sub += [[f, "ilike", t]]
+                    sub = leaves[0]
                 domain = ["&", domain, sub] if domain else sub
             return domain
 
@@ -57,3 +51,45 @@ class DiscussRecordLinks(http.Controller):
 
         # Return a single flat list; client groups by .group
         return {"suggestions": suggestions}
+
+    @http.route("/discuss_record_links/labels", type="json", auth="user", methods=["POST"])
+    def labels(self, targets: list[dict] | None = None):
+        """Return rendered labels for a list of {model, id} using configured templates.
+
+        targets example: [{"model": "motor", "id": 42}, ...]
+        """
+        env = request.env
+        cfg = load_config(env)
+        # Build map model -> cfg
+        by_model_cfg: dict[str, ModelCfg] = {}
+        for c in cfg.values():
+            by_model_cfg[c.model] = c
+
+        result: list[dict] = []
+        if not targets:
+            return result
+        # Group ids by model
+        by_model: dict[str, set[int]] = {}
+        for t in targets:
+            model = (t or {}).get("model")
+            rid = (t or {}).get("id")
+            if not model or not rid:
+                continue
+            by_model.setdefault(model, set()).add(int(rid))
+
+        for model, idset in by_model.items():
+            c = by_model_cfg.get(model)
+            if not c:
+                # Fallback to display_name only
+                rows = env[model].sudo().read(list(idset), ["display_name"])
+                for r in rows:
+                    result.append({"model": model, "id": r["id"], "label": r.get("display_name")})
+                continue
+            fields = {"display_name"}
+            fields.update(extract_template_fields(c.display_template))
+            rows = env[model].sudo().read(list(idset), list(fields))
+            for r in rows:
+                label = render_template(c.display_template or "{{ display_name }}", r) or r.get("display_name")
+                result.append({"model": model, "id": r["id"], "label": label})
+
+        return result
