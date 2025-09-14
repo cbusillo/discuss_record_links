@@ -1,6 +1,5 @@
 import { patch } from "@web/core/utils/patch"
 import { UseSuggestion } from "@mail/core/common/suggestion_hook"
-import { _t } from "@web/core/l10n/translation"
 // No need for router here; use canonical /web# URLs for consistency across models
 
 // 2) Intercept selection to run our command instead of inserting raw text
@@ -31,4 +30,3 @@ patch(UseSuggestion.prototype, {
         return super.insert(option)
     },
 })
-

@@ -1,20 +1,18 @@
 import { patch } from "@web/core/utils/patch"
 import { Composer } from "@mail/core/common/composer"
 
-const originalNavigableListProps = Object.getOwnPropertyDescriptor(
-    Composer.prototype,
-    "navigableListProps"
-)?.get
+// Minimal extension: teach Composer how to render our custom suggestion type
+// without altering any core behavior.
+const _get = Object.getOwnPropertyDescriptor(Composer.prototype, "navigableListProps")?.get
 
-// Extend Composer to render our RecordLink suggestions inline
 patch(Composer.prototype, {
     get navigableListProps() {
+        const props = _get ? _get.call(this) : {}
         const items = this.suggestion?.state.items
         if (!items || items.type !== "RecordLink") {
-            return originalNavigableListProps ? originalNavigableListProps.call(this) : {}
+            return props
         }
-        // Build minimal props compatible with core NavigableList
-        return {
+        const base = {
             anchorRef: this.inputContainerRef.el,
             position: this.env.inChatter ? "bottom-fit" : "top-fit",
             onSelect: (ev, option) => {
@@ -22,9 +20,12 @@ patch(Composer.prototype, {
                 this.markEventHandled(ev, "composer.selectSuggestion")
             },
             isLoading: !!this.suggestion.search.term && this.suggestion.state.isFetching,
+        }
+        return {
+            ...base,
             options: items.suggestions.map((s) => ({
-                label: s.group ? `${s.group}: ${s.name}` : s.name,
-                record: { id: s.id, name: s.name, model: s.model },
+                label: s.label,
+                record: { id: s.id, model: s.model },
                 classList: "o-mail-Composer-suggestion",
             })),
         }

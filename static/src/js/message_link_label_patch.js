@@ -4,97 +4,128 @@ import { Message } from "@mail/core/common/message"
 function parseInternalUrl(href) {
     try {
         const url = new URL(href, window.location.origin)
-        // Case 1: hash params (/web#id=..&model=..)
         if (url.hash?.startsWith('#')) {
             const params = new URLSearchParams(url.hash.slice(1))
-            const id = params.get('id')
+            const id = Number(params.get('id') || params.get('fid'))
             const model = params.get('model')
-            if (id && model) return { id: Number(id), model }
+            if (id && model) return { id, model }
         }
-        // Case 2: pretty internal path (/odoo/<model>/<id>)
         const parts = url.pathname.split('/').filter(Boolean)
-        const odooIdx = parts.indexOf('odoo')
-        if (odooIdx >= 0 && parts.length >= odooIdx + 3) {
-            const model = decodeURIComponent(parts[odooIdx + 1])
-            const idStr = parts[odooIdx + 2]
-            const id = Number(idStr)
-            if (model && id) return { id, model }
+        const idx = parts.indexOf('odoo')
+        if (idx >= 0 && parts.length >= idx + 3) {
+            const model = decodeURIComponent(parts[idx + 1])
+            const id = Number(parts[idx + 2])
+            if (id && model) return { id, model }
         }
-        return {}
     } catch {
-        return {}
+    }
+    return {}
+}
+
+function linkifyInternalUrls(root) {
+    try {
+        const re = /(https?:\/\/[^\s]+\/(?:web#|odoo(?:#|\/))[^\s]*)/gi
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null)
+        const toProcess = []
+        let node
+        while ((node = walker.nextNode())) {
+            if (node.nodeValue && re.test(node.nodeValue)) {
+                toProcess.push(node)
+            }
+            re.lastIndex = 0
+        }
+        for (const textNode of toProcess) {
+            const frag = document.createDocumentFragment()
+            let txt = textNode.nodeValue || ""
+            let m
+            re.lastIndex = 0
+            let lastIndex = 0
+            while ((m = re.exec(txt))) {
+                const url = m[1]
+                const start = m.index
+                const end = start + url.length
+                if (start > lastIndex) {
+                    frag.appendChild(document.createTextNode(txt.slice(lastIndex, start)))
+                }
+                const a = document.createElement('a')
+                a.setAttribute('href', url)
+                a.textContent = url
+                frag.appendChild(a)
+                lastIndex = end
+            }
+            if (lastIndex < txt.length) {
+                frag.appendChild(document.createTextNode(txt.slice(lastIndex)))
+            }
+            textNode.parentNode.replaceChild(frag, textNode)
+        }
+    } catch { /* best effort */
     }
 }
 
 patch(Message.prototype, {
     prepareMessageBody(bodyEl) {
-        if (super.prepareMessageBody) {
-            super.prepareMessageBody(...arguments)
-        }
-        // 1) Convert plain internal URLs to anchors (covers localhost where core linkify won't)
-        convertInternalTextToAnchors(bodyEl)
-
-        // 2) Enhance internal record links: replace URL text with record name
-        const anchors = Array.from(bodyEl.querySelectorAll('a[href*="/web#"], a[href*="/odoo#"], a[href*="/odoo/"]'))
-        if (!anchors.length) return
-        const orm = this.env.services.orm
-        const byModel = new Map()
-        const targets = []
-        for (const a of anchors) {
-            if (a.dataset.oeModel && a.dataset.oeId) continue
-            const { id, model } = parseInternalUrl(a.getAttribute('href') || '')
-            if (!id || !model) continue
-            targets.push([a, model, id])
-            if (!byModel.has(model)) byModel.set(model, new Set())
-            byModel.get(model).add(id)
-        }
-        for (const [model, idSet] of byModel.entries()) {
-            const ids = Array.from(idSet)
-            orm.call(model, 'read', [ids, ['display_name']], {})
-                .then(rows => {
-                    const names = new Map(rows.map(r => [r.id, r.display_name]))
-                    for (const [a, m, id] of targets) {
-                        if (m !== model) continue
-                        const name = names.get(id)
-                        if (name) {
-                            a.textContent = name
-                            a.setAttribute('data-oe-id', String(id))
-                            a.setAttribute('data-oe-model', model)
-                            a.setAttribute('data-rll', '1')
-                        }
-                    }
+        try {
+            // Test-only guard: allow disabling labeler via URL param for red/green runs
+            try {
+                const q = new URLSearchParams(window.location.search || '')
+                if (q.get('drl_disable') === '1') {
+                    return super.prepareMessageBody ? super.prepareMessageBody(...arguments) : undefined
+                }
+            } catch {
+            }
+            if (super.prepareMessageBody) {
+                super.prepareMessageBody(...arguments)
+            }
+            // Fallback: if core didn't linkify, attempt to convert bare URLs to anchors
+            if (!bodyEl.querySelector('a[href*="/web#"], a[href*="/odoo#"], a[href*="/odoo/"]')) {
+                linkifyInternalUrls(bodyEl)
+            }
+            const anchors = Array.from(bodyEl.querySelectorAll('a[href*="/web#"], a[href*="/odoo#"], a[href*="/odoo/"]'))
+            if (!anchors.length) return
+            const rpc = this.env.services.rpc
+            const orm = this.env.services.orm
+            const byModel = new Map()
+            const targets = []
+            for (const a of anchors) {
+                const href = a.getAttribute('href') || ''
+                const { id, model } = parseInternalUrl(href)
+                if (!id || !model) continue
+                targets.push([a, model, id])
+                if (!byModel.has(model)) byModel.set(model, new Set())
+                byModel.get(model).add(id)
+            }
+            if (!targets.length) return
+            const payload = []
+            for (const [model, idSet] of byModel.entries()) {
+                for (const id of idSet) payload.push({ model, id })
+            }
+            const applyLabels = (rows) => {
+                const map = new Map((rows || []).map(r => [`${r.model}:${r.id}`, r.label]))
+                for (const [a, model, id] of targets) {
+                    const label = map.get(`${model}:${id}`)
+                    if (!label) continue
+                    a.textContent = label
+                    a.setAttribute('data-oe-id', String(id))
+                    a.setAttribute('data-oe-model', model)
+                }
+            }
+            rpc('/discuss_record_links/labels', { targets: payload })
+                .then((rows) => {
+                    if (!rows || !rows.length) throw new Error('empty')
+                    applyLabels(rows)
                 })
                 .catch(() => {
+                    // Fallback: display_name
+                    for (const [model, idSet] of byModel.entries()) {
+                        const ids = Array.from(idSet)
+                        orm.call(model, 'read', [ids, ['display_name']], {})
+                            .then(rr => applyLabels(rr.map(r => ({ model, id: r.id, label: r.display_name }))))
+                            .catch(() => {
+                            })
+                    }
                 })
+        } catch (e) {
+            // swallow to avoid Owl lifecycle crashes
         }
     },
 })
-
-function convertInternalTextToAnchors(root) {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-    const internals = []
-    const reAbs = /(https?:\/\/[^\s]+(?:\/web#[^\s]*|\/odoo\/[\w.]+\/[0-9]+))/g
-    const reWebHash = /(\/web#[^\s]+)/g
-    const rePretty = /(\/odoo\/[\w.]+\/[0-9]+)/g
-    let node
-    while ((node = walker.nextNode())) {
-        const text = node.textContent || ''
-        if (!reAbs.test(text) && !reWebHash.test(text) && !rePretty.test(text)) continue
-        const frag = document.createDocumentFragment()
-        let idx = 0
-        for (const match of text.matchAll(new RegExp(`${reAbs.source}|${reWebHash.source}|${rePretty.source}`, 'g'))) {
-            const m = match[0]
-            const start = match.index || 0
-            if (start > idx) frag.append(document.createTextNode(text.slice(idx, start)))
-            const a = document.createElement('a')
-            a.href = m
-            a.textContent = m
-            frag.append(a)
-            internals.push(a)
-            idx = start + m.length
-        }
-        if (idx < text.length) frag.append(document.createTextNode(text.slice(idx)))
-        node.parentNode.replaceChild(frag, node)
-    }
-    return internals
-}
