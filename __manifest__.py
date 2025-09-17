@@ -6,7 +6,7 @@
     "depends": [
         "base",
         "mail",
-        "product",
+        "stock",
         "web",
         "web_editor",
     ],
